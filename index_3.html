@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#FFB703">
+<title>우리집 포인트 통장</title>
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./icon-180.png">
+<link rel="icon" href="./icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="포인트통장">
+<style>
+html,body{margin:0;background:#F4F6FB;color:#151823;
+  font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Pretendard","Noto Sans KR",system-ui,sans-serif}
+@media(prefers-color-scheme:dark){html,body{background:#0F1117;color:#E9ECF3}}
+#boot{padding:80px 24px;text-align:center;font-size:14px;line-height:1.7;opacity:.65}
+#boot button{margin-top:14px;padding:9px 18px;border:0;border-radius:999px;background:#FFB703;color:#1a1200;font:inherit;font-weight:700}
+</style>
+</head>
+<body>
+<div id="boot">🪙<br>불러오는 중…</div>
+<script>
+(async function(){
+  var SB="https://ytzhsnfqlzohxmdxocay.supabase.co";
+  var KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl0emhzbmZxbHpvaHhtZHhvY2F5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgyMTc4MzUsImV4cCI6MjEwMzc5MzgzNX0.0xqV_G9t16-YdqtSIIhvSSCFIlu5T7ATf0-aY6cd5G0";
+  var boot=document.getElementById("boot");
+  try{
+    var r=await fetch(SB+"/rest/v1/kp_app?id=eq.app&select=body&_="+Date.now(),
+      {headers:{apikey:KEY,Authorization:"Bearer "+KEY},cache:"no-store"});
+    if(!r.ok) throw new Error("서버 응답 "+r.status);
+    var j=await r.json();
+    var src=j&&j[0]&&j[0].body;
+    if(!src) throw new Error("앱 코드를 찾을 수 없어요");
+    try{localStorage.setItem("kp_cache",src)}catch(e){}
+    mount(src);
+  }catch(e){
+    var c=null; try{c=localStorage.getItem("kp_cache")}catch(_){}
+    if(c){ mount(c); }
+    else{ boot.innerHTML='앱을 불러오지 못했어요<br><small>'+String(e&&e.message||e)+'</small><br><button onclick="location.reload()">다시 시도</button>'; }
+  }
+  function mount(src){
+    var box=document.createElement("div");
+    box.innerHTML=src;
+    var scripts=[].slice.call(box.querySelectorAll("script"));
+    scripts.forEach(function(s){s.parentNode.removeChild(s)});
+    if(boot&&boot.parentNode)boot.parentNode.removeChild(boot);
+    while(box.firstChild)document.body.appendChild(box.firstChild);
+    scripts.forEach(function(old){
+      var s=document.createElement("script");
+      s.textContent=old.textContent;
+      document.body.appendChild(s);
+    });
+  }
+})();
+</script>
+</body>
+</html>
