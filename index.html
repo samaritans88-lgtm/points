@@ -27,27 +27,46 @@ html,body{margin:0;background:#F4F6FB;color:#151823;
   var SB="https://ytzhsnfqlzohxmdxocay.supabase.co";
   var KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl0emhzbmZxbHpvaHhtZHhvY2F5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgyMTc4MzUsImV4cCI6MjEwMzc5MzgzNX0.0xqV_G9t16-YdqtSIIhvSSCFIlu5T7ATf0-aY6cd5G0";
   var boot=document.getElementById("boot");
-  try{
-    var r=await fetch(SB+"/rest/v1/kp_app?id=eq.app&select=body&_="+Date.now(),
-      {headers:{apikey:KEY,Authorization:"Bearer "+KEY},cache:"no-store"});
-    if(!r.ok) throw new Error("서버 응답 "+r.status);
+  var errs=[];
+
+  async function viaFunction(){
+    var r=await fetch(SB+"/functions/v1/points/app",{cache:"no-store"});
+    if(!r.ok) throw new Error("fn "+r.status);
     var j=await r.json();
-    var src=j&&j[0]&&j[0].body;
-    if(!src) throw new Error("앱 코드를 찾을 수 없어요");
-    try{localStorage.setItem("kp_cache",src)}catch(e){}
-    mount(src);
-  }catch(e){
-    var c=null; try{c=localStorage.getItem("kp_cache")}catch(_){}
-    if(c){ mount(c); }
-    else{ boot.innerHTML='앱을 불러오지 못했어요<br><small>'+String(e&&e.message||e)+'</small><br><button onclick="location.reload()">다시 시도</button>'; }
+    if(!j||!j.body) throw new Error("fn empty");
+    return j.body;
   }
+  async function viaRest(){
+    var r=await fetch(SB+"/rest/v1/kp_app?id=eq.app&select=body",
+      {headers:{apikey:KEY,Authorization:"Bearer "+KEY},cache:"no-store"});
+    if(!r.ok) throw new Error("rest "+r.status);
+    var j=await r.json();
+    if(!j||!j[0]||!j[0].body) throw new Error("rest empty");
+    return j[0].body;
+  }
+
+  var src=null;
+  for (var fn of [viaFunction, viaRest]) {
+    try { src = await fn(); break; } catch(e){ errs.push(String(e&&e.message||e)); }
+  }
+  if(src){
+    try{ localStorage.setItem("kp_cache", src) }catch(e){}
+    mount(src);
+  } else {
+    var c=null; try{ c=localStorage.getItem("kp_cache") }catch(e){}
+    if(c){ mount(c); }
+    else if(boot){
+      boot.innerHTML='앱을 불러오지 못했어요<br><small>'+errs.join(" / ")+'</small><br><button onclick="location.reload()">다시 시도</button>';
+    }
+  }
+
   function mount(src){
     var box=document.createElement("div");
     box.innerHTML=src;
     var scripts=[].slice.call(box.querySelectorAll("script"));
-    scripts.forEach(function(s){s.parentNode.removeChild(s)});
-    if(boot&&boot.parentNode)boot.parentNode.removeChild(boot);
-    while(box.firstChild)document.body.appendChild(box.firstChild);
+    scripts.forEach(function(s){ s.parentNode.removeChild(s) });
+    if(boot&&boot.parentNode) boot.parentNode.removeChild(boot);
+    while(box.firstChild) document.body.appendChild(box.firstChild);
     scripts.forEach(function(old){
       var s=document.createElement("script");
       s.textContent=old.textContent;
