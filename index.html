@@ -72,6 +72,42 @@ html,body{margin:0;background:#F4F6FB;color:#151823;
       s.textContent=old.textContent;
       document.body.appendChild(s);
     });
+    try{ remindPatch(); }catch(e){ console.error("remindPatch", e); }
+  }
+
+  // 정기 알림 시간 설정 (부모 모드 → 관리 탭). 시간은 kp_config.remind_times 에 저장되고
+  // 서버(pg_cron → kp_remind_tick)가 매분 확인해 그 시각에 알림을 보낸다.
+  function remindPatch(){
+    if(typeof vAdmin!=="function"||typeof S==="undefined"||typeof window.sheetRemind==="function")return;
+    window.remindTimes=function(){var v=S.cfg.remind_times;return Array.isArray(v)?v.slice().sort():[];};
+    var base=vAdmin;
+    vAdmin=function(){
+      var html=base();
+      var card='<div class="card"><h3>⏰ 정기 알림 시간</h3>'
+        +'<div class="sub">이 시각마다 오늘 받은 점수 · 현재 점수 · 남은 점수(%)를 알림으로 보내요. 🔔 알림을 켠 기기만 받아요.</div>'
+        +'<div class="chips">'+(remindTimes().map(function(t){return '<span class="chip">'+esc(t)+'</span>'}).join("")
+          ||'<span class="hint" style="margin:0">설정된 시간이 없어요 (정기 알림 꺼짐)</span>')+'</div>'
+        +'<button class="btn solid" style="width:100%;margin-top:10px" onclick="sheetRemind()">⏰ 알림 시간 바꾸기</button></div>\n';
+      var at=html.indexOf('<div class="card">\n    <h3>⚙️ 설정</h3>');
+      return at<0?html+card:html.slice(0,at)+card+html.slice(at);
+    };
+    window.sheetRemind=function(){
+      if(!S.draft||!S.draft.times)S.draft={times:remindTimes()};
+      openSheet('<h3 style="margin-top:0">⏰ 정기 알림 시간</h3>'
+        +'<div class="hint" style="margin:0 0 10px">시간을 눌러 바꾸고, ✕로 지우고, 아래 버튼으로 추가하세요. 다 바꾼 뒤 <b>저장</b>을 눌러야 적용돼요.</div>'
+        +(S.draft.times.map(function(t,i){
+            return '<div class="row"><input type="time" value="'+esc(t)+'" onchange="S.draft.times['+i+']=this.value" style="flex:1">'
+              +'<button class="btn sm ghost" onclick="S.draft.times.splice('+i+',1);sheetRemind()">✕</button></div>';
+          }).join("")||'<div class="empty">알림 시간이 없어요</div>')
+        +'<button class="btn ghost" style="width:100%;margin-top:10px" onclick="S.draft.times.push(\'20:00\');sheetRemind()">＋ 시간 추가</button>'
+        +'<button class="btn gold" style="width:100%;margin-top:8px" onclick="saveRemind()">저장</button>');
+    };
+    window.saveRemind=async function(){
+      var t=S.draft.times.map(function(x){return String(x).slice(0,5)}).filter(function(x){return /^\d\d:\d\d$/.test(x)});
+      t=t.filter(function(x,i){return t.indexOf(x)===i}).sort();
+      if(!await admin("set_config",{k:"remind_times",v:t}))return;
+      closeSheet();toast(t.length?"알림 시간 "+t.length+"개 저장했어요 ⏰":"정기 알림을 껐어요");await load();
+    };
   }
 })();
 </script>
