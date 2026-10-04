@@ -140,6 +140,35 @@ select pg_temp.ok(private.remind_tick()=2, '알림 시각 → 2가족 모두 처
 select pg_temp.ok(private.remind_tick()=0, '같은 분에 두 번 안 보냄');
 select pg_temp.ok((select count(*) from net.calls where body->>'tag'='remind-parent')=1, '부모 알림 1건 호출');
 
+-- 8-1. 배지 · 공동 목표 · 이자
+set role authenticated;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000000a', false);
+select pg_temp.ok(exists(select 1 from badge where child_id=(select v from ids where k='k1')::uuid and code='first_todo'), '첫 할 일 승인 → 첫 걸음 배지');
+select add_entry(jsonb_build_object('child_id',(select v from ids where k='k2'),'raw_points',100,'label','심부름'));
+select pg_temp.ok(exists(select 1 from badge where child_id=(select v from ids where k='k2')::uuid and code='earned_100'), '누적 100점 배지');
+insert into ids select 'tg', create_team_goal('가족 외식', 50, '🍕')->>'id';
+select pg_temp.ok(not (contribute_team((select v from ids where k='tg')::uuid,(select v from ids where k='k1')::uuid,10)->>'ok')::boolean, '잔액 모자라면 못 보탬');
+select pg_temp.ok((contribute_team((select v from ids where k='tg')::uuid,(select v from ids where k='k2')::uuid,80)->>'points')::int=50, '남은 만큼만 보탬 (80 → 50)');
+select pg_temp.ok((select status from team_goal where id=(select v from ids where k='tg')::uuid)='done', '목표 점수 채우면 자동 달성');
+select pg_temp.ok(exists(select 1 from badge where child_id=(select v from ids where k='k2')::uuid and code='team_done'), '함께 목표 달성 배지');
+select pg_temp.ok((select balance from balances() where child_id=(select v from ids where k='k2')::uuid)=50, '보탠 만큼 잔액 감소 (100-50)');
+insert into ids select 'tg2', create_team_goal('놀이공원', 100)->>'id';
+select contribute_team((select v from ids where k='tg2')::uuid,(select v from ids where k='k2')::uuid,20);
+select pg_temp.ok((cancel_team_goal((select v from ids where k='tg2')::uuid)->>'refunded')::int=1, '공동 목표 취소 → 돌려받음');
+select pg_temp.ok((select balance from balances() where child_id=(select v from ids where k='k2')::uuid)=50, '취소 후 잔액 원상복구');
+reset role;
+update family set interest_pct=10, interest_cap=3 where name='A네';
+select pg_temp.ok(private.pay_interest((select id from family where name='A네'), true)=1, '잔액 있는 아이 1명에게 이자');
+select pg_temp.ok((select points from entry where kind='interest')=3, '이자 상한 3점 적용 (50×10%=5 → 3)');
+select pg_temp.ok(private.pay_interest((select id from family where name='A네'), true)=0, '같은 날 두 번 안 줌');
+select pg_temp.ok(exists(select 1 from badge where code='interest_first'), '첫 이자 배지');
+-- 연속 기록: 지난 3일 할 일 전부 승인
+insert into todo(family_id,child_id,todo_date,label,points,status)
+  select c.family_id, c.id, private.family_today(c.family_id)-g, '테스트', 1, 'approved' from child c, generate_series(1,3) g where c.name='로하';
+select pg_temp.ok(private.child_streak((select id from child where name='로하'))>=3, '연속 기록 계산');
+select private.award_badges((select id from child where name='로하'));
+select pg_temp.ok(exists(select 1 from badge b join child c on c.id=b.child_id where c.name='로하' and code='streak_3'), '3일 연속 배지');
+
 -- 9. 탈퇴
 set role authenticated;
 select pg_temp.as_user('00000000-0000-0000-0000-00000000000c', false);

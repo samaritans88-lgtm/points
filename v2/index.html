@@ -146,7 +146,27 @@ const EMOJIS = ["🦊","🐰","🐻","🐼","🐯","🦁","🐨","🐸","🐧","
 const COLORS = ["#4F7CFF","#FF7A59","#0E9F6E","#B15CFF","#FFB703","#E5484D","#14B8A6","#64748B"];
 const WIDGET = /[?&]widget=1/.test(location.search);
 const S = { me:null, fam:null, kids:[], bal:[], cats:[], rules:[], routines:[], entries:[], todos:[], reqs:[], goals:[],
-            devices:[], members:[], sel:null, tab:"today", draft:null };
+            devices:[], members:[], teams:[], contribs:[], badges:[], prog:{}, sel:null, tab:"today", draft:null };
+// 배지 목록 (서버 award_badges 와 코드 일치)
+const BADGES = [
+  ["first_todo","🌱","첫 걸음","처음으로 할 일을 해내기"],
+  ["streak_3","🔥","3일 연속","할 일을 3일 연속 전부 해내기"],
+  ["streak_7","🔥","일주일 연속","7일 연속 전부 해내기"],
+  ["streak_14","🔥","2주 연속","14일 연속 전부 해내기"],
+  ["streak_30","🏆","한 달 연속","30일 연속 전부 해내기"],
+  ["streak_100","👑","100일 연속","100일 연속 전부 해내기"],
+  ["earned_100","🪙","누적 100점","지금까지 받은 점수 100점"],
+  ["earned_500","💰","누적 500점","지금까지 받은 점수 500점"],
+  ["earned_1000","💎","누적 1,000점","지금까지 받은 점수 1,000점"],
+  ["earned_5000","🚀","누적 5,000점","지금까지 받은 점수 5,000점"],
+  ["save_300","🐷","300점 모으기","잔액 300점 만들기"],
+  ["save_1000","🏦","1,000점 모으기","잔액 1,000점 만들기"],
+  ["self_request","✋","스스로 신청","잘한 일을 스스로 신청해서 인정받기"],
+  ["goal_done","🎯","목표 달성","목표 통장의 물건 사기"],
+  ["smart_buy","📚","똑똑한 소비","책·체험처럼 할인되는 카테고리로 사기"],
+  ["interest_first","🌳","첫 이자","모아둔 점수로 이자 받기"],
+  ["team_done","🤝","함께 해냄","형제와 공동 목표 달성"],
+];
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const isParent = () => S.me && S.me.state === "parent";
@@ -210,13 +230,16 @@ async function load(first){
     sel(sb.from("request").select("*").order("created_at", { ascending:false }).limit(100)),
     sel(sb.from("goal").select("*").neq("status", "canceled").order("created_at", { ascending:false })),
   ];
+  qs.push(sel(sb.from("team_goal").select("*").neq("status", "canceled").order("created_at", { ascending:false })));
+  qs.push(sel(sb.from("team_contribution").select("*").order("created_at")));
+  qs.push(sel(sb.from("badge").select("*").order("earned_at", { ascending:false })));
   if (isParent()) {
     qs.push(sel(sb.from("device").select("*").is("revoked_at", null).order("created_at")));
     qs.push(sel(sb.from("family_member").select("*").order("created_at")));
   }
   const r = await Promise.all(qs);
-  const [fam, kids, bal, cats, rules, routines, entries, todos, reqs, goals, devices, members] = r;
-  Object.assign(S, { fam: fam[0], kids, bal, cats, rules, routines, entries, todos, reqs, goals,
+  const [fam, kids, bal, cats, rules, routines, entries, todos, reqs, goals, teams, contribs, badges, devices, members] = r;
+  Object.assign(S, { fam: fam[0], kids, bal, cats, rules, routines, entries, todos, reqs, goals, teams, contribs, badges,
                      devices: devices || [], members: members || [] });
   // 선택 아이: 아이 기기는 자기 아이 고정
   if (isDevice() && S.me.mode === "child") S.sel = S.me.child_id;
@@ -224,7 +247,14 @@ async function load(first){
     let saved = null; try { saved = localStorage.getItem("kp2_sel"); } catch(e) {}
     S.sel = (S.kids.find(k => k.id === saved) || S.kids[0] || {}).id;
   }
+  await loadProgress();
   render();
+}
+// 선택된 아이의 연속 기록·습관 진행 (서버 계산)
+async function loadProgress(){
+  if (!S.sel) return;
+  const { data } = await sb.rpc("child_progress", { p_child:S.sel });
+  if (data) S.prog[S.sel] = data;
 }
 
 /* ================= 가입 전 화면 ================= */
@@ -297,7 +327,7 @@ function vRevoked(){
 /* 가입(온보딩): 가족 이름 → 아이들 → 옵션 → 동의 */
 function vOnboard(){
   showChrome(false);
-  if (!S.draft || !S.draft.kids) S.draft = { kids:[{ name:"", emoji:EMOJIS[0], color:COLORS[0] }], name:"", me:"", sib:false, ex:true, agree:false };
+  if (!S.draft || !S.draft.kids) S.draft = { kids:[{ name:"", emoji:EMOJIS[0], color:COLORS[0] }], name:"", me:"", sib:false, ex:true, interest:false, agree:false };
   const d = S.draft;
   $("#view").innerHTML = `
   <div class="hero" style="padding-top:28px"><div class="logo">🏡</div><h1>우리 가족 만들기</h1>
@@ -322,6 +352,8 @@ function vOnboard(){
     <h3>⚙️ 옵션</h3>
     <label class="switch"><span><b>형제끼리 점수 보이기</b><br><small class="sub">켜면 아이 폰에서 형제의 잔액·오늘 달성률이 보여요 (경쟁 유도). 상세 기록은 안 보여요.</small></span>
       <input type="checkbox" ${d.sib?"checked":""} onchange="S.draft.sib=this.checked"></label>
+    <label class="switch"><span><b>저축 이자 (주 2%)</b><br><small class="sub">매주 일요일 저녁, 모아둔 점수의 2%를 이자로 줘요(최대 50점). 기다리면 불어나는 걸 배워요.</small></span>
+      <input type="checkbox" ${d.interest?"checked":""} onchange="S.draft.interest=this.checked"></label>
     <label class="switch"><span><b>예시 루틴 넣기</b><br><small class="sub">이불 정리·숙제·독서·가방 챙기기. 나중에 지우거나 바꿀 수 있어요.</small></span>
       <input type="checkbox" ${d.ex?"checked":""} onchange="S.draft.ex=this.checked"></label>
   </div>
@@ -344,7 +376,7 @@ async function createFamily(){
   if (!d.agree) return toast("개인정보 저장에 동의해 주세요");
   const r = await call("create_family", { p_name:d.name.trim(), p_children:kids,
     p_timezone: (t => !t || t === "UTC" || t === "Etc/UTC" ? "Asia/Seoul" : t)(Intl.DateTimeFormat().resolvedOptions().timeZone),
-    p_display_name: d.me.trim() || null, p_examples:d.ex, p_show_siblings:d.sib });
+    p_display_name: d.me.trim() || null, p_examples:d.ex, p_show_siblings:d.sib, p_interest_pct: d.interest ? 2 : 0 });
   if (!r) return;
   S.draft = null; toast("가족을 만들었어요 🎉"); location.reload();
 }
@@ -380,7 +412,7 @@ function render(){
   $("#whoBtn").textContent = isParent() ? "⚙️" : (S.me.mode === "shared" ? "👨‍👩‍👧 공용" : "📱 " + (me().name || ""));
   $("#whoBtn").onclick = () => isParent() ? go("admin") : sheetDevice();
   renderKids(); renderTabs();
-  $("#view").innerHTML = ({ today:vToday, history:vHistory, goals:vGoals, rules:vRules, report:vReport, admin:vAdmin }[S.tab] || vToday)();
+  $("#view").innerHTML = ({ today:vToday, history:vHistory, goals:vGoals, badges:vBadges, rules:vRules, report:vReport, admin:vAdmin }[S.tab] || vToday)();
 }
 function renderKids(){
   $("#kids").innerHTML = visibleKids().map(k => { const b = balOf(k.id).balance, st = stat(todosOf(k.id, todayStr()));
@@ -392,13 +424,13 @@ function renderKids(){
 }
 const pending = () => [...S.todos.filter(t=>t.status==="done"), ...S.reqs.filter(r=>r.status==="pending")];
 function renderTabs(){
-  const t = [["today","오늘"],["history","내역"],["goals","목표"],["rules","규칙표"],["report","리포트"]];
+  const t = [["today","오늘"],["history","내역"],["goals","목표"],["badges","배지"],["report","리포트"],["rules","규칙표"]];
   if (isParent()) t.push(["admin","관리"]);
   $("#tabs").innerHTML = t.map(([k,l]) => { let n="";
     if (k==="admin" && isParent()) { const c = pending().length; if (c) n = ` <b style="color:var(--gold)">${c}</b>`; }
     return `<button class="tab ${S.tab===k?"on":""}" onclick="go('${k}')">${l}${n}</button>`; }).join("");
 }
-function pick(id){ S.sel = id; try { localStorage.setItem("kp2_sel", id); } catch(e) {} render(); }
+function pick(id){ S.sel = id; try { localStorage.setItem("kp2_sel", id); } catch(e) {} render(); loadProgress().then(render); }
 function go(t){ S.tab = t; render(); window.scrollTo(0,0); }
 
 function vWidget(){
@@ -429,7 +461,9 @@ function todoRow(t){
 }
 function vToday(){
   if (!S.sel) return '<div class="card"><div class="empty">아이가 없어요</div></div>';
-  const k = me(), b = balOf(S.sel).balance, ts = todosOf(S.sel, todayStr()), st = stat(ts), sk = streakOf(S.sel), act = canAct(S.sel);
+  const k = me(), b = balOf(S.sel).balance, ts = todosOf(S.sel, todayStr()), st = stat(ts), act = canAct(S.sel);
+  const sk = (S.prog[S.sel] && S.prog[S.sel].streak != null) ? S.prog[S.sel].streak : streakOf(S.sel);
+  const nb = S.badges.filter(x => x.child_id === S.sel && Date.now() - new Date(x.earned_at) < 3*86400e3);
   const yest = todosOf(S.sel, dayAgo(1)).filter(t => t.status !== "approved");
   const myReqs = S.reqs.filter(r => r.child_id === S.sel && r.status === "pending");
   const bySlot = SLOTS.map(([s,ic]) => { const l = ts.filter(t => (t.slot||"낮") === s);
@@ -441,6 +475,8 @@ function vToday(){
     <div class="big" style="color:${b<0?"var(--minus)":"var(--ink)"}">${b}<span style="font-size:20px;font-weight:800"> 점</span></div>
     <div style="font-size:15px;font-weight:800;color:var(--gold)">${won(b)}</div>
   </div>
+  ${nb.length?`<div class="card" onclick="go('badges')" style="cursor:pointer"><h3>🏅 새 배지!</h3>
+    <div class="chips">${nb.map(x=>`<span class="chip">${esc(badgeInfo(x)[1])} ${esc(badgeInfo(x)[2])}</span>`).join("")}</div></div>`:""}
   <div class="card">
     <h3>🎯 오늘의 달성률 ${sk?`<span class="streak" style="float:right">🔥 ${sk}일 연속</span>`:""}</h3>
     ${st.n?`
@@ -495,7 +531,7 @@ function vHistory(){
   const dates = Object.keys(grp).sort().reverse();
   const row = e => { const dead = cx.has(e.id);
     return `<div class="row ${dead?"canceled":""}">
-      <div class="t"><b>${e.kind==="cancel"?"↩️":esc(catOf(e.category).emoji)} ${esc(e.label)}</b>
+      <div class="t"><b>${e.kind==="cancel"?"↩️":e.kind==="interest"?"🌳":e.kind==="team"?"🤝":esc(catOf(e.category).emoji)} ${esc(e.label)}</b>
         <small>${e.kind==="spend"?`${e.raw_points}점 × ${(+e.weight).toFixed(1)}배 ${esc(e.category||"")}`:e.kind==="cancel"?"취소 기록"+(e.memo?" · "+esc(e.memo):""):esc(e.category||"받은 점수")}${dead?" · 취소됨":""}</small></div>
       <div class="amt ${e.points>=0?"plus":"minus"}">${e.points>0?"+":""}${e.points}</div>
       ${isParent()&&!dead&&e.kind!=="cancel"?`<button class="btn sm ghost" onclick="cancelEntry('${e.id}')">취소</button>`:""}
@@ -517,7 +553,7 @@ async function cancelEntry(id){
 function goalNeed(g){ return Math.round(g.price_won / ((S.fam && S.fam.won_per_point) || 100) * catOf(g.category).weight); }
 function vGoals(){
   const gs = S.goals.filter(g => g.child_id === S.sel), b = balOf(S.sel).balance, st = stat(todosOf(S.sel, todayStr()));
-  return `<div class="card"><h3>🏦 목표 통장</h3>
+  return vTeam() + `<div class="card"><h3>🏦 목표 통장</h3>
     <div class="sub">갖고 싶은 걸 걸어두면 지금 잔액으로 얼마나 왔는지 보여줘요. 카테고리 가중치가 적용돼요.</div>
     ${gs.length?gs.map(g=>{ const need=goalNeed(g), pct=Math.max(0,Math.min(100,Math.round(b/need*100))), left=Math.max(0,need-b);
       const days = st.total ? Math.ceil(left/Math.max(1,Math.round(st.total*0.7))) : null;
@@ -543,6 +579,69 @@ async function buyGoal(id){ const g = S.goals.find(x => x.id === id);
   if (r) await call("upsert_goal", { p: { id, title:g.title, price_won:g.price_won, category:g.category, status:"done" } });
   toast("구매 처리했어요"); await load(); }
 async function delGoal(id){ if (confirm("이 목표를 지울까요?")) { await call("delete_goal", { p_goal:id }); await load(); } }
+
+/* ---------- 공동 목표 ---------- */
+function teamProgress(gid){ const cx = canceledIds();
+  return S.contribs.filter(c => c.goal_id === gid && !cx.has(c.entry_id)).reduce((a,c) => a + c.points, 0); }
+function vTeam(){
+  const gs = S.teams.filter(g => g.status === "active" || (g.status === "done" && Date.now() - new Date(g.achieved_at) < 14*86400e3));
+  if (!gs.length && !isParent()) return "";
+  const cx = canceledIds();
+  return `<div class="card"><h3>🤝 형제 공동 목표</h3><div class="sub">각자 자기 점수를 보태서 함께 모아요. 누가 얼마나 보탰는지 다 같이 봐요.</div>
+    ${gs.map(g => { const got = teamProgress(g.id), pct = Math.min(100, Math.round(got / g.target_points * 100));
+      const by = S.kids.map(k => [k, S.contribs.filter(c => c.goal_id === g.id && c.child_id === k.id && !cx.has(c.entry_id)).reduce((a,c)=>a+c.points,0)]).filter(x => x[1]);
+      return `<div style="margin-bottom:14px">
+        <div class="kv"><b>${esc(g.emoji)} ${esc(g.title)}${g.status==="done"?" 🎉":""}</b><span>${got} / ${g.target_points}점</span></div>
+        <div class="bar g"><i style="width:${pct}%"></i></div>
+        <div class="chips" style="margin-top:6px">${by.map(([k,v]) => `<span class="chip">${esc(k.emoji)} ${esc(k.name)} <b>${v}</b></span>`).join("") || '<span class="hint" style="margin:0">아직 아무도 안 보탰어요</span>'}</div>
+        ${g.status==="active"&&canAct(S.sel)?`<button class="btn gold wide" onclick="sheetContribute('${g.id}')">${esc(me().name)} 점수 보태기</button>`:""}
+        ${g.status==="active"&&isParent()?`<button class="btn ghost wide" onclick="cancelTeam('${g.id}')">취소 (보탠 점수 돌려주기)</button>`:""}
+      </div>`; }).join("") || '<div class="empty">진행 중인 공동 목표가 없어요</div>'}
+    ${isParent()?`<button class="btn solid wide" onclick="sheetTeam()">＋ 공동 목표 만들기</button>`:""}</div>`;
+}
+function sheetTeam(){
+  openSheet(`<h3 style="margin-top:0">🤝 공동 목표 만들기</h3>
+    <div class="hint" style="margin:0 0 6px">예: 가족 외식, 놀이공원, 보드게임. 아이들이 자기 점수를 보태서 함께 채워요.</div>
+    <div style="display:flex;gap:8px"><input id="tge" style="width:64px;text-align:center" value="🍕" maxlength="4"><input id="tgt" placeholder="목표 이름" maxlength="60"></div>
+    <label class="f">모아야 할 점수</label><input id="tgp" type="number" inputmode="numeric" value="500">
+    <button class="btn solid wide" onclick="saveTeam()">만들기</button>`);
+}
+async function saveTeam(){ const t = $("#tgt").value.trim(), n = +$("#tgp").value;
+  if (!t || !(n > 0)) return toast("이름과 점수를 넣어주세요");
+  if (!await call("create_team_goal", { p_title:t, p_target:n, p_emoji:$("#tge").value.trim() })) return;
+  closeSheet(); toast("공동 목표를 만들었어요"); await load(); }
+function sheetContribute(gid){ const g = S.teams.find(x => x.id === gid), left = g.target_points - teamProgress(gid), b = balOf(S.sel).balance;
+  openSheet(`<h3 style="margin-top:0">${esc(g.emoji)} ${esc(g.title)}에 보태기</h3>
+    <div class="sub">${esc(me().name)}의 잔액 <b>${b}점</b> · 남은 목표 <b>${left}점</b></div>
+    <label class="f">보탤 점수</label><input id="ctp" type="number" inputmode="numeric" value="${Math.max(0, Math.min(10, b, left))}">
+    <button class="btn gold wide" onclick="doContribute('${gid}')">보태기</button>
+    <div class="hint">보탠 점수는 내 잔액에서 빠져요. 목표가 취소되면 돌려받아요.</div>`); }
+async function doContribute(gid){ const r = await call("contribute_team", { p_goal:gid, p_child:S.sel, p_points:+$("#ctp").value }); if (!r) return;
+  closeSheet(); toast(`${r.points}점 보탰어요 🤝`); await load(); }
+async function cancelTeam(gid){ if (!confirm("공동 목표를 취소할까요? 보탠 점수는 각자에게 돌려줘요.")) return;
+  if (await call("cancel_team_goal", { p_goal:gid })) toast("취소하고 점수를 돌려줬어요"); await load(); }
+
+/* ---------- 배지 ---------- */
+function badgeInfo(b){ if (b.code.startsWith("habit:")) return [b.code, "🎓", "습관 졸업: " + (b.label || ""), "같은 루틴 30번 연속 성공"];
+  return BADGES.find(x => x[0] === b.code) || [b.code, "🏅", b.code, ""]; }
+function vBadges(){
+  const mine = S.badges.filter(b => b.child_id === S.sel), got = new Set(mine.map(b => b.code));
+  const habits = mine.filter(b => b.code.startsWith("habit:"));
+  const prog = S.prog[S.sel] || { habits:[] };
+  const cell = (emoji, name, desc, on, when) => `<div style="text-align:center;padding:10px 4px;border-radius:14px;background:var(--chip);${on?"":"opacity:.38;filter:grayscale(1)"}">
+      <div style="font-size:30px">${emoji}</div><div style="font-size:12px;font-weight:800;margin-top:2px">${esc(name)}</div>
+      <div style="font-size:10px;color:var(--muted);line-height:1.35;margin-top:2px">${on&&when?when.slice(0,10):esc(desc)}</div></div>`;
+  return `<div class="card"><h3>🏅 ${esc(me().name)}의 배지 (${mine.length}개)</h3><div class="sub">흐린 배지는 아직 못 받은 거예요. 조건을 보고 도전해 보세요!</div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
+      ${BADGES.map(([c,e,n,d]) => { const b = mine.find(x => x.code === c); return cell(e, n, d, got.has(c), b && b.earned_at); }).join("")}
+    </div></div>
+  <div class="card"><h3>🎓 습관 졸업</h3><div class="sub">같은 루틴을 <b>30번 연속</b> 해내면 '진짜 내 습관'으로 졸업해요.</div>
+    ${habits.map(b => `<div class="row"><div class="t"><b>🎓 ${esc(b.label)}</b><small>${b.earned_at.slice(0,10)} 졸업</small></div><span class="badge ok">졸업</span></div>`).join("")}
+    ${prog.habits.filter(h => !got.has("habit:" + h.routine_id)).map(h => `<div style="margin:8px 0">
+      <div class="kv"><span>${esc(h.label)}</span><b>${h.streak} / 30</b></div>
+      <div class="bar"><i style="width:${Math.min(100, Math.round(h.streak / 30 * 100))}%"></i></div></div>`).join("") || (habits.length ? "" : '<div class="empty">루틴이 생기면 여기서 진행 상황을 볼 수 있어요</div>')}
+  </div>`;
+}
 
 /* ---------- 규칙표 ---------- */
 function vRules(){
@@ -573,7 +672,23 @@ function vReport(){
   const rate = days.slice(-7).map(d => stat(todosOf(S.sel,d))).filter(s=>s.n);
   const avg = rate.length ? Math.round(rate.reduce((a,s)=>a+s.pct,0)/rate.length) : 0;
   const byCat = {}; list.filter(e => e.points<0 && !cx.has(e.id)).forEach(e => byCat[e.category||"기타"] = (byCat[e.category||"기타"]||0) - e.points);
-  return `<div class="card"><h3>📈 최근 14일 받은 점수</h3>
+  // 나의 최고 기록: 주(월~일) 단위 받은 점수, 연속 기록
+  const weekKey = d => { const x = new Date(d + "T00:00:00Z"); x.setUTCDate(x.getUTCDate() - ((x.getUTCDay() + 6) % 7)); return x.toISOString().slice(0,10); };
+  const weeks = {}; list.filter(e => e.points > 0 && !cx.has(e.id)).forEach(e => { const k = weekKey(e.occurred_on); weeks[k] = (weeks[k]||0) + e.points; });
+  const thisW = weeks[weekKey(todayStr())] || 0, lastW = weeks[weekKey(dayAgo(7))] || 0;
+  const bestW = Math.max(0, ...Object.entries(weeks).filter(([k]) => k !== weekKey(todayStr())).map(([,v]) => v));
+  let run = 0, bestRun = 0; for (let i = 60; i >= 1; i--) { const l = todosOf(S.sel, dayAgo(i));
+    if (l.length && l.every(t => t.status === "approved")) { run++; bestRun = Math.max(bestRun, run); } else run = 0; }
+  const curStreak = (S.prog[S.sel] && S.prog[S.sel].streak) || 0; bestRun = Math.max(bestRun, curStreak);
+  const best = `<div class="card"><h3>🥇 나의 최고 기록</h3><div class="sub">형제가 아니라 <b>지난 나</b>와 비교해요.</div>
+    <div class="kv"><span>이번 주 받은 점수</span><b>${thisW}점 ${thisW>bestW&&bestW?"🎉 최고 기록!":""}</b></div>
+    <div class="kv"><span>지난주</span><b>${lastW}점 ${thisW>lastW?`<span class="plus">(+${thisW-lastW})</span>`:""}</b></div>
+    <div class="kv"><span>내 최고 주</span><b>${bestW}점</b></div>
+    ${bestW?`<div class="bar g"><i style="width:${Math.min(100,Math.round(thisW/bestW*100))}%"></i></div><div class="hint">최고 기록까지 ${Math.max(0,bestW-thisW)}점 남았어요</div>`:""}
+    <div class="divider"></div>
+    <div class="kv"><span>지금 연속</span><b>🔥 ${curStreak}일</b></div>
+    <div class="kv"><span>최고 연속 (최근 60일)</span><b>${bestRun}일</b></div></div>`;
+  return best + `<div class="card"><h3>📈 최근 14일 받은 점수</h3>
     <div class="gbars">${earned.map(v=>`<div class="col"><div class="p" style="height:${Math.round(v/max*100)}%" title="${v}"></div></div>`).join("")}</div>
     <div class="glabels">${days.map((d,i)=>`<div>${i%2?"":d.slice(8)}</div>`).join("")}</div></div>
   <div class="card"><h3>🗓️ 이번 주 (최근 7일)</h3>
@@ -621,6 +736,16 @@ function vAdmin(){
       <input type="checkbox" ${S.fam.show_siblings?"checked":""} onchange="setFam({show_siblings:this.checked})"></label>
     <div class="grid2"><button class="btn ghost" onclick="sheetKids()">아이 추가·수정</button><button class="btn ghost" onclick="sheetInvite()">배우자 초대</button></div>
   </div>
+  <div class="card"><h3>🌳 저축 이자</h3>
+    <div class="sub">모아둔 점수에 매주 이자를 줘요. 기다리면 불어나는 걸 직접 경험하는 경제교육이에요.</div>
+    <div class="kv"><span>이자율</span><b>${+S.fam.interest_pct ? "주 " + (+S.fam.interest_pct) + "%" : "꺼짐"}</b></div>
+    ${+S.fam.interest_pct?`<div class="kv"><span>지급</span><b>매주 ${DOW[S.fam.interest_dow-1]}요일 저녁 7시 · 최대 ${S.fam.interest_cap}점</b></div>`:""}
+    <button class="btn ghost wide" onclick="sheetInterest()">이자 설정</button></div>
+  ${(() => { const grads = S.badges.filter(b => b.code.startsWith("habit:"));
+    return grads.length ? `<div class="card"><h3>🎓 졸업한 습관</h3><div class="sub">30번 연속 해낸 루틴이에요. 이제 습관이 됐으니 점수를 줄이거나 끄는 걸 검토해 보세요 (점수 없이도 하는지 보는 게 목표).</div>
+      ${grads.map(b => { const rid = b.code.slice(6), r = S.routines.find(x => x.id === rid);
+        return `<div class="row"><div class="t"><b>${esc((S.kids.find(k=>k.id===b.child_id)||{}).name)} · ${esc(b.label)}</b><small>${r ? (r.active ? "지금 +" + r.points + "점" : "꺼짐") : "삭제된 루틴"}</small></div>
+          ${r && r.active ? `<button class="btn sm ghost" onclick="halfRoutine('${r.id}')">점수 반으로</button><button class="btn sm ghost" onclick="togRoutineQuiet('${r.id}')">끄기</button>` : ""}</div>`; }).join("")}</div>` : ""; })()}
   <div class="card"><h3>⏰ 정기 알림 시간</h3>
     <div class="sub">이 시각마다 오늘 받은 점수 · 현재 점수 · 남은 점수(%)를 알림으로 보내요. 🔔 알림을 켠 기기만 받아요.</div>
     <div class="chips">${times.map(t=>`<span class="chip">${t}</span>`).join("")||'<span class="hint" style="margin:0">설정된 시간이 없어요 (정기 알림 꺼짐)</span>'}</div>
@@ -635,6 +760,21 @@ function vAdmin(){
     <div class="grid2"><button class="btn ghost" onclick="resetLogin()">로그아웃</button><button class="btn danger" onclick="sheetLeave()">탈퇴</button></div>
     <div class="hint"><a href="./privacy.html" target="_blank">개인정보처리방침</a></div></div>`;
 }
+function sheetInterest(){
+  openSheet(`<h3 style="margin-top:0">🌳 저축 이자</h3>
+    <label class="f">주간 이자율 (%) — 0이면 끔</label><input id="ip" type="number" step="0.5" min="0" max="10" value="${+S.fam.interest_pct}">
+    <label class="f">지급 요일 (저녁 7시)</label><select id="id">${DOW.map((d,i)=>`<option value="${i+1}" ${i+1===S.fam.interest_dow?"selected":""}>${d}요일</option>`).join("")}</select>
+    <label class="f">한 번에 최대 (점)</label><input id="ic" type="number" min="1" value="${S.fam.interest_cap}">
+    <div class="hint">예) 잔액 500점, 2% → 매주 10점. 너무 높으면 '모으기만' 하게 되니 1~3%를 추천해요.</div>
+    <button class="btn solid wide" onclick="saveInterest()">저장</button>`);
+}
+async function saveInterest(){ const pct = +$("#ip").value; if (!(pct >= 0 && pct <= 10)) return toast("0 ~ 10 사이로 넣어주세요");
+  if (!await call("update_family", { p: { interest_pct:pct, interest_dow:+$("#id").value, interest_cap:+$("#ic").value } })) return;
+  closeSheet(); toast(pct ? "이자를 켰어요 🌳" : "이자를 껐어요"); await load(); }
+async function halfRoutine(id){ const r = S.routines.find(x => x.id === id);
+  if (!confirm(`'${r.label}' 점수를 ${r.points}점 → ${Math.floor(r.points/2)}점으로 줄일까요?`)) return;
+  if (await call("update_routine", { p: { id, points:Math.floor(r.points/2) } })) toast("줄였어요"); await load(); }
+async function togRoutineQuiet(id){ if (!confirm("이 루틴을 끌까요? (점수 없이도 하는지 지켜봐요)")) return; await call("toggle_routine", { p_routine:id }); await load(); }
 function fmtAgo(ts){ const m = Math.round((Date.now() - new Date(ts)) / 60000);
   return m < 60 ? m + "분 전" : m < 1440 ? Math.round(m/60) + "시간 전" : Math.round(m/1440) + "일 전"; }
 async function approveAll(){ const w = S.todos.filter(t => t.status === "done");

@@ -28,6 +28,11 @@ create table public.family (
   remind_times   text[] not null default array['07:30','12:00','16:00','19:00'],
   remind_last    text,
   show_siblings  boolean not null default false,  -- 아이 폰에서 형제 잔액·오늘 달성률 보이기(경쟁 유도)
+  interest_pct   numeric(4,2) not null default 0 check (interest_pct between 0 and 10),  -- 주간 저축 이자율(%) 0=끔
+  interest_dow   int not null default 7 check (interest_dow between 1 and 7),           -- 지급 요일(1=월 … 7=일)
+  interest_cap   int not null default 50 check (interest_cap between 1 and 100000),     -- 한 번에 최대 이자(점)
+  interest_last  text,
+  ensured_on     date,                                                                  -- 오늘 루틴을 만든 날짜
   created_by     uuid references auth.users(id) on delete set null,
   created_at     timestamptz not null default now()
 );
@@ -138,7 +143,7 @@ create table public.entry (
   family_id   uuid not null references public.family(id) on delete cascade,
   child_id    uuid not null references public.child(id) on delete cascade,
   occurred_on date not null,
-  kind        text not null check (kind in ('earn','spend','adjust','cancel')),
+  kind        text not null check (kind in ('earn','spend','adjust','cancel','interest','team')),
   label       text not null,
   raw_points  int  not null,
   weight      numeric(4,2) not null default 1,
@@ -222,6 +227,43 @@ create table public.push_sub (
 );
 create index on public.push_sub (family_id);
 
+-- 형제 공동 목표: 아이들이 자기 점수를 보태서 함께 모은다
+create table public.team_goal (
+  id            uuid primary key default gen_random_uuid(),
+  family_id     uuid not null references public.family(id) on delete cascade,
+  title         text not null check (length(btrim(title)) between 1 and 60),
+  target_points int  not null check (target_points between 1 and 1000000),
+  emoji         text not null default '🤝',
+  status        text not null default 'active' check (status in ('active','done','canceled')),
+  created_at    timestamptz not null default now(),
+  achieved_at   timestamptz
+);
+create index on public.team_goal (family_id);
+
+create table public.team_contribution (
+  id         uuid primary key default gen_random_uuid(),
+  family_id  uuid not null references public.family(id) on delete cascade,
+  goal_id    uuid not null references public.team_goal(id) on delete cascade,
+  child_id   uuid not null references public.child(id) on delete cascade,
+  entry_id   uuid not null unique references public.entry(id) on delete cascade,
+  points     int  not null check (points > 0),
+  created_at timestamptz not null default now()
+);
+create index on public.team_contribution (goal_id);
+create index on public.team_contribution (child_id);
+
+-- 배지 (한 번 받으면 남는다). code 예: streak_7, earned_1000, habit:<routine id>
+create table public.badge (
+  id        uuid primary key default gen_random_uuid(),
+  family_id uuid not null references public.family(id) on delete cascade,
+  child_id  uuid not null references public.child(id) on delete cascade,
+  code      text not null,
+  label     text,                 -- 습관 졸업 배지는 루틴 이름
+  earned_at timestamptz not null default now(),
+  unique (child_id, code)
+);
+create index on public.badge (family_id);
+
 -- 서버 비밀값 (VAPID 키, 푸시 훅 비밀) — API 로 노출되지 않는 private 스키마
 create table private.secret (k text primary key, v text not null);
 
@@ -295,6 +337,9 @@ alter table public.todo          enable row level security;
 alter table public.request       enable row level security;
 alter table public.goal          enable row level security;
 alter table public.push_sub      enable row level security;
+alter table public.team_goal     enable row level security;
+alter table public.team_contribution enable row level security;
+alter table public.badge         enable row level security;
 
 create policy family_read on public.family for select to authenticated
   using (id = (select private.my_family_id()));
@@ -321,6 +366,14 @@ create policy request_read on public.request for select to authenticated
   using (family_id = (select private.my_family_id()) and child_id in (select private.my_child_ids()));
 create policy goal_read on public.goal for select to authenticated
   using (family_id = (select private.my_family_id()) and child_id in (select private.my_child_ids()));
+-- 공동 목표는 협동이므로 가족 모두가 본다
+create policy team_goal_read on public.team_goal for select to authenticated
+  using (family_id = (select private.my_family_id()));
+create policy team_contrib_read on public.team_contribution for select to authenticated
+  using (family_id = (select private.my_family_id()));
+-- 배지는 '보이는 아이'(형제 보기 설정 반영) 것만
+create policy badge_read on public.badge for select to authenticated
+  using (family_id = (select private.my_family_id()) and child_id in (select private.my_visible_child_ids()));
 create policy push_read on public.push_sub for select to authenticated
   using (user_id = (select auth.uid()));
 
@@ -396,7 +449,8 @@ end $$;
 -- 가족 만들기 (Google 로그인 부모, 아직 가족 없음)
 create or replace function public.create_family(
   p_name text, p_children jsonb, p_timezone text default 'Asia/Seoul',
-  p_display_name text default null, p_examples boolean default false, p_show_siblings boolean default false
+  p_display_name text default null, p_examples boolean default false, p_show_siblings boolean default false,
+  p_interest_pct numeric default 0
 ) returns jsonb
 language plpgsql security definer set search_path = '' as $$
 declare v_uid uuid := (select auth.uid()); v_fam uuid; c jsonb; v_child uuid; i int := 0;
@@ -415,7 +469,8 @@ begin
     p_timezone := 'Asia/Seoul';
   end if;
 
-  insert into public.family(name, timezone, created_by, show_siblings) values (btrim(p_name), p_timezone, v_uid, coalesce(p_show_siblings,false))
+  insert into public.family(name, timezone, created_by, show_siblings, interest_pct)
+  values (btrim(p_name), p_timezone, v_uid, coalesce(p_show_siblings,false), least(10, greatest(0, coalesce(p_interest_pct,0))))
   returning id into v_fam;
   insert into public.family_member(family_id, user_id, display_name) values (v_fam, v_uid, p_display_name);
 
@@ -468,7 +523,10 @@ begin
     won_per_point = coalesce((p->>'won_per_point')::int, won_per_point),
     timezone      = coalesce(p->>'timezone', timezone),
     remind_times  = coalesce(v_times, remind_times),
-    show_siblings = coalesce((p->>'show_siblings')::boolean, show_siblings)
+    show_siblings = coalesce((p->>'show_siblings')::boolean, show_siblings),
+    interest_pct  = coalesce((p->>'interest_pct')::numeric, interest_pct),
+    interest_dow  = coalesce((p->>'interest_dow')::int, interest_dow),
+    interest_cap  = coalesce((p->>'interest_cap')::int, interest_cap)
    where id = v_fam;
   return jsonb_build_object('ok', true);
 end $$;
@@ -634,6 +692,7 @@ begin
    where r.family_id = p_family and r.active and extract(isodow from v_d)::int = any(r.dows)
   on conflict (child_id, todo_date, routine_id) where routine_id is not null do nothing;
   get diagnostics v_n = row_count;
+  update public.family set ensured_on = v_d where id = p_family and ensured_on is distinct from v_d;
   return v_n;
 end $$;
 
@@ -1037,6 +1096,8 @@ begin
     select coalesce(sum(points),0) into v_bal from public.entry where child_id = new.child_id;
     perform private.notify(jsonb_build_object('target','child','family_id',new.family_id,'child_id',new.child_id,
       'title', case when new.kind = 'cancel' then '↩️ 기록이 취소됐어요 (' || new.points || '점)'
+                    when new.kind = 'interest' then '🌳 저축 이자 +' || new.points || '점'
+                    when new.kind = 'team' then '🤝 공동 목표에 ' || (-new.points) || '점 보탰어요'
                     when new.points >= 0 then '🎉 +' || new.points || '점 받았어요'
                     else '💸 ' || new.points || '점 사용' end,
       'body', new.label || ' · 잔액 ' || v_bal || '점', 'tag','entry-' || new.id));
@@ -1081,6 +1142,11 @@ language plpgsql security definer set search_path = '' as $$
 declare f record; v_hm text; v_key text; v_p jsonb; x jsonb; v_n int := 0;
 begin
   for f in select * from public.family loop
+    -- 앱을 아무도 안 열어도 매일 루틴이 올라오게 (연속 기록이 엉뚱하게 끊기지 않도록)
+    if f.ensured_on is distinct from private.family_today(f.id) then
+      perform private.ensure_today_for(f.id);
+    end if;
+    perform private.pay_interest(f.id);
     v_hm := to_char(now() at time zone f.timezone, 'HH24:MI');
     continue when not (v_hm = any(f.remind_times));
     v_key := to_char(now() at time zone f.timezone, 'YYYY-MM-DD') || ' ' || v_hm;
@@ -1101,6 +1167,258 @@ begin
     v_n := v_n + 1;
   end loop;
   return v_n;
+end $$;
+
+-- =====================================================================
+-- 저축 이자 · 공동 목표 · 배지
+-- =====================================================================
+
+-- 주간 저축 이자: 지급 요일 저녁 7시(가족 시간대) 이후 첫 tick 에 한 번.
+-- 잔액이 양수인 아이에게 floor(잔액 × 이자율), 최대 interest_cap 점.
+create or replace function private.pay_interest(p_family uuid, p_force boolean default false) returns int
+language plpgsql security definer set search_path = '' as $$
+declare f record; v_local timestamp; v_key text; c record; v_bal int; v_pts int; v_n int := 0;
+begin
+  select * into f from public.family where id = p_family;
+  if f.interest_pct <= 0 then return 0; end if;
+  v_local := now() at time zone f.timezone;
+  if not p_force and (extract(isodow from v_local)::int <> f.interest_dow or v_local::time < time '19:00') then return 0; end if;
+  v_key := to_char(v_local, 'YYYY-MM-DD');
+  if f.interest_last is not distinct from v_key then return 0; end if;
+  update public.family set interest_last = v_key where id = p_family;
+  for c in select id from public.child where family_id = p_family and archived_at is null loop
+    select coalesce(sum(points),0) into v_bal from public.entry where child_id = c.id;
+    v_pts := least(f.interest_cap, floor(v_bal * f.interest_pct / 100))::int;
+    if v_pts >= 1 then
+      insert into public.entry(family_id, child_id, occurred_on, kind, label, raw_points, weight, points, category, source)
+      values (p_family, c.id, v_local::date, 'interest', '저축 이자 ' || f.interest_pct::float || '%', v_bal, 1, v_pts, '이자', 'interest');
+      v_n := v_n + 1;
+    end if;
+  end loop;
+  return v_n;
+end $$;
+
+-- 연속 기록: 할 일이 있는 날 전부 승인된 날이 며칠 이어졌나 (오늘은 다 끝났을 때만 포함)
+create or replace function private.child_streak(p_child uuid) returns int
+language plpgsql stable security definer set search_path = '' as $$
+declare v_today date; d date; v_ok boolean; v_n int := 0;
+begin
+  select private.family_today(family_id) into v_today from public.child where id = p_child;
+  select bool_and(status = 'approved') into v_ok from public.todo where child_id = p_child and todo_date = v_today;
+  if v_ok then v_n := 1; end if;
+  d := v_today - 1;
+  loop
+    select bool_and(status = 'approved') into v_ok from public.todo where child_id = p_child and todo_date = d;
+    exit when v_ok is not true;
+    v_n := v_n + 1; d := d - 1;
+    exit when v_n > 1000;
+  end loop;
+  return v_n;
+end $$;
+
+-- 습관 연속: 이 루틴의 최근 할 일이 몇 번 연속 승인됐나 (오늘 미완료는 건너뜀)
+create or replace function private.routine_streak(p_routine uuid) returns int
+language sql stable security definer set search_path = '' as $$
+  with t as (
+    select t.todo_date, t.status = 'approved' as ok,
+           row_number() over (order by t.todo_date desc) as rn
+      from public.todo t
+     where t.routine_id = p_routine
+       and not (t.todo_date = private.family_today(t.family_id) and t.status <> 'approved')
+  )
+  select coalesce(min(rn) - 1, (select count(*) from t))::int from t where not ok
+$$;
+
+-- 배지 지급 (새로 받은 배지마다 알림). 이미 받은 배지는 무시.
+create or replace function private.award_badges(p_child uuid) returns int
+language plpgsql security definer set search_path = '' as $$
+declare
+  v_fam uuid; v_name text; v_streak int; v_earned int; v_bal int; v_new int := 0; b record; r record;
+  v_codes text[] := '{}';
+begin
+  select family_id, name into v_fam, v_name from public.child where id = p_child;
+  if v_fam is null then return 0; end if;
+  v_streak := private.child_streak(p_child);
+  select coalesce(sum(e.points),0) into v_earned from public.entry e
+   where e.child_id = p_child and e.kind in ('earn','adjust') and e.points > 0
+     and not exists (select 1 from public.entry x where x.cancels_entry_id = e.id);
+  select coalesce(sum(points),0) into v_bal from public.entry where child_id = p_child;
+
+  if exists (select 1 from public.todo where child_id = p_child and status = 'approved') then v_codes := v_codes || text 'first_todo'; end if;
+  if v_streak >= 3   then v_codes := v_codes || text 'streak_3'; end if;
+  if v_streak >= 7   then v_codes := v_codes || text 'streak_7'; end if;
+  if v_streak >= 14  then v_codes := v_codes || text 'streak_14'; end if;
+  if v_streak >= 30  then v_codes := v_codes || text 'streak_30'; end if;
+  if v_streak >= 100 then v_codes := v_codes || text 'streak_100'; end if;
+  if v_earned >= 100  then v_codes := v_codes || text 'earned_100'; end if;
+  if v_earned >= 500  then v_codes := v_codes || text 'earned_500'; end if;
+  if v_earned >= 1000 then v_codes := v_codes || text 'earned_1000'; end if;
+  if v_earned >= 5000 then v_codes := v_codes || text 'earned_5000'; end if;
+  if v_bal >= 300  then v_codes := v_codes || text 'save_300'; end if;
+  if v_bal >= 1000 then v_codes := v_codes || text 'save_1000'; end if;
+  if exists (select 1 from public.request where child_id = p_child and status = 'approved' and kind = 'earn') then v_codes := v_codes || text 'self_request'; end if;
+  if exists (select 1 from public.goal where child_id = p_child and status = 'done') then v_codes := v_codes || text 'goal_done'; end if;
+  if exists (select 1 from public.entry e where e.child_id = p_child and e.kind = 'spend' and e.weight < 1
+               and not exists (select 1 from public.entry x where x.cancels_entry_id = e.id)) then v_codes := v_codes || text 'smart_buy'; end if;
+  if exists (select 1 from public.entry where child_id = p_child and kind = 'interest') then v_codes := v_codes || text 'interest_first'; end if;
+  if exists (select 1 from public.team_contribution c join public.team_goal g on g.id = c.goal_id
+              where c.child_id = p_child and g.status = 'done') then v_codes := v_codes || text 'team_done'; end if;
+
+  for b in
+    insert into public.badge(family_id, child_id, code)
+    select v_fam, p_child, x from unnest(v_codes) x
+    on conflict (child_id, code) do nothing
+    returning code
+  loop
+    v_new := v_new + 1;
+    perform private.notify(jsonb_build_object('target','child','family_id',v_fam,'child_id',p_child,
+      'title','🏅 새 배지를 받았어요!','body', private.badge_name(b.code, null),'tag','badge-' || p_child || '-' || b.code));
+    perform private.notify(jsonb_build_object('target','parent','family_id',v_fam,
+      'title','🏅 ' || v_name || ' 새 배지','body', private.badge_name(b.code, null),'tag','badge-' || p_child || '-' || b.code));
+  end loop;
+
+  -- 습관 졸업: 같은 루틴 30번 연속 승인
+  for r in select id, label from public.routine where child_id = p_child and active loop
+    if private.routine_streak(r.id) >= 30 then
+      insert into public.badge(family_id, child_id, code, label) values (v_fam, p_child, 'habit:' || r.id, r.label)
+      on conflict (child_id, code) do nothing;
+      if found then
+        v_new := v_new + 1;
+        perform private.notify(jsonb_build_object('target','child','family_id',v_fam,'child_id',p_child,
+          'title','🎓 습관 졸업!','body', r.label || ' 30번 연속 성공 — 이제 진짜 내 습관이에요','tag','habit-' || r.id));
+        perform private.notify(jsonb_build_object('target','parent','family_id',v_fam,
+          'title','🎓 ' || v_name || ' 습관 졸업','body', r.label || ' 30번 연속. 점수를 줄이거나 끄는 걸 검토해 보세요','tag','habit-' || r.id));
+      end if;
+    end if;
+  end loop;
+  return v_new;
+end $$;
+
+create or replace function private.badge_name(p_code text, p_label text) returns text
+language sql immutable as $$
+  select case p_code
+    when 'first_todo'     then '🌱 첫 걸음 — 처음으로 할 일 성공'
+    when 'streak_3'       then '🔥 3일 연속'
+    when 'streak_7'       then '🔥 일주일 연속'
+    when 'streak_14'      then '🔥 2주 연속'
+    when 'streak_30'      then '🏆 한 달 연속'
+    when 'streak_100'     then '👑 100일 연속'
+    when 'earned_100'     then '🪙 누적 100점'
+    when 'earned_500'     then '💰 누적 500점'
+    when 'earned_1000'    then '💎 누적 1,000점'
+    when 'earned_5000'    then '🚀 누적 5,000점'
+    when 'save_300'       then '🐷 300점 모으기'
+    when 'save_1000'      then '🏦 1,000점 모으기'
+    when 'self_request'   then '✋ 스스로 신청해서 인정받기'
+    when 'goal_done'      then '🎯 목표 달성'
+    when 'smart_buy'      then '📚 똑똑한 소비 (할인 카테고리로 구매)'
+    when 'interest_first' then '🌳 첫 이자 받기'
+    when 'team_done'      then '🤝 형제와 함께 목표 달성'
+    else coalesce('🎓 습관 졸업: ' || p_label, p_code) end
+$$;
+
+-- 배지 검사 트리거: 점수 기록, 할 일 승인, 목표 달성, 공동 목표 달성 때
+create or replace function private.badge_trg() returns trigger
+language plpgsql security definer set search_path = '' as $$
+declare c uuid;
+begin
+  if tg_table_name = 'team_goal' then
+    for c in select distinct child_id from public.team_contribution where goal_id = new.id loop
+      perform private.award_badges(c);
+    end loop;
+  else
+    perform private.award_badges(new.child_id);
+  end if;
+  return null;
+exception when others then
+  raise warning 'award_badges failed: %', sqlerrm;  -- 배지 실패가 본 작업을 막지 않게
+  return null;
+end $$;
+create trigger badge_entry after insert on public.entry for each row execute function private.badge_trg();
+create trigger badge_todo  after update of status on public.todo for each row when (new.status = 'approved' and old.status <> 'approved') execute function private.badge_trg();
+create trigger badge_goal  after update of status on public.goal for each row when (new.status = 'done' and old.status <> 'done') execute function private.badge_trg();
+create trigger badge_team  after update of status on public.team_goal for each row when (new.status = 'done' and old.status <> 'done') execute function private.badge_trg();
+
+-- 아이 화면용: 연속 기록 · 습관 진행
+create or replace function public.child_progress(p_child uuid) returns jsonb
+language plpgsql stable security definer set search_path = '' as $$
+begin
+  if p_child not in (select private.my_visible_child_ids()) then raise exception 'no_access' using errcode = '42501'; end if;
+  return jsonb_build_object('streak', private.child_streak(p_child),
+    'habits', (select coalesce(jsonb_agg(jsonb_build_object('routine_id', r.id, 'label', r.label,
+                 'streak', private.routine_streak(r.id)) order by r.sort), '[]')
+                 from public.routine r where r.child_id = p_child and r.active));
+end $$;
+
+-- ---------- 공동 목표 ----------
+create or replace function public.create_team_goal(p_title text, p_target int, p_emoji text default '🤝') returns jsonb
+language plpgsql security definer set search_path = '' as $$
+declare v_fam uuid := private.require_parent(); v_id uuid;
+begin
+  insert into public.team_goal(family_id, title, target_points, emoji)
+  values (v_fam, btrim(p_title), p_target, coalesce(nullif(p_emoji,''),'🤝')) returning id into v_id;
+  return jsonb_build_object('ok', true, 'id', v_id);
+end $$;
+
+create or replace function private.team_progress(p_goal uuid) returns int
+language sql stable security definer set search_path = '' as $$
+  select coalesce(sum(c.points),0)::int from public.team_contribution c
+   where c.goal_id = p_goal and not exists (select 1 from public.entry x where x.cancels_entry_id = c.entry_id)
+$$;
+
+-- 아이(또는 부모)가 자기 점수를 공동 목표에 보탠다
+create or replace function public.contribute_team(p_goal uuid, p_child uuid, p_points int) returns jsonb
+language plpgsql security definer set search_path = '' as $$
+declare v_fam uuid := private.require_child_access(p_child); g record; v_bal int; v_left int; v_pts int; v_entry uuid;
+begin
+  select * into g from public.team_goal where id = p_goal and family_id = v_fam for update;
+  if not found or g.status <> 'active' then return jsonb_build_object('ok', false, 'error', '진행 중인 공동 목표가 아니에요'); end if;
+  select coalesce(sum(points),0) into v_bal from public.entry where child_id = p_child;
+  v_left := g.target_points - private.team_progress(p_goal);
+  v_pts := least(coalesce(p_points,0), v_left);
+  if v_pts < 1 then return jsonb_build_object('ok', false, 'error', '보탤 점수를 넣어주세요'); end if;
+  if v_pts > v_bal then return jsonb_build_object('ok', false, 'error', '잔액이 모자라요 (지금 ' || v_bal || '점)'); end if;
+  insert into public.entry(family_id, child_id, occurred_on, kind, label, raw_points, weight, points, category, source, created_by)
+  values (v_fam, p_child, private.family_today(v_fam), 'team', g.emoji || ' ' || g.title, v_pts, 1, -v_pts, '공동목표', 'team', (select auth.uid()))
+  returning id into v_entry;
+  insert into public.team_contribution(family_id, goal_id, child_id, entry_id, points) values (v_fam, p_goal, p_child, v_entry, v_pts);
+  if private.team_progress(p_goal) >= g.target_points then
+    update public.team_goal set status = 'done', achieved_at = now() where id = p_goal;
+    perform private.notify(jsonb_build_object('target','parent','family_id',v_fam,
+      'title','🤝 공동 목표 달성!','body', g.title || ' — 아이들이 ' || g.target_points || '점을 함께 모았어요','tag','team-' || p_goal));
+  end if;
+  return jsonb_build_object('ok', true, 'points', v_pts);
+end $$;
+
+-- 공동 목표 취소: 보탠 점수는 취소 기록으로 각자에게 돌려준다
+create or replace function public.cancel_team_goal(p_goal uuid) returns jsonb
+language plpgsql security definer set search_path = '' as $$
+declare v_fam uuid := private.require_parent(); c record; v_n int := 0;
+begin
+  update public.team_goal set status = 'canceled' where id = p_goal and family_id = v_fam and status = 'active';
+  if not found then return jsonb_build_object('ok', false, 'error', '진행 중인 공동 목표가 아니에요'); end if;
+  for c in select e.* from public.team_contribution tc join public.entry e on e.id = tc.entry_id
+            where tc.goal_id = p_goal and not exists (select 1 from public.entry x where x.cancels_entry_id = e.id) loop
+    insert into public.entry(family_id, child_id, occurred_on, kind, label, raw_points, weight, points, category, memo, source, cancels_entry_id, created_by)
+    values (v_fam, c.child_id, private.family_today(v_fam), 'cancel', '돌려받음: ' || c.label, c.raw_points, 1, -c.points,
+            '공동목표', '공동 목표 취소', 'cancel', c.id, (select auth.uid()));
+    v_n := v_n + 1;
+  end loop;
+  return jsonb_build_object('ok', true, 'refunded', v_n);
+end $$;
+
+-- 루틴 수정 (습관 졸업 후 점수 줄이기 등)
+create or replace function public.update_routine(p jsonb) returns jsonb
+language plpgsql security definer set search_path = '' as $$
+declare v_fam uuid := private.require_parent();
+begin
+  update public.routine set
+    label  = coalesce(nullif(btrim(p->>'label'),''), label),
+    points = coalesce((p->>'points')::int, points),
+    slot   = case when p->>'slot' in ('아침','낮','저녁') then p->>'slot' else slot end
+   where id = (p->>'id')::uuid and family_id = v_fam;
+  if not found then raise exception 'no_access' using errcode = '42501'; end if;
+  return jsonb_build_object('ok', true);
 end $$;
 
 -- 데이터 확인용 요약 (이전 검증 등)

@@ -94,7 +94,11 @@ begin
          coalesce(x->>'category','일반'), x->>'status', coalesce((x->>'created_at')::timestamptz, now()), (x->>'achieved_at')::timestamptz
     from jsonb_array_elements(d->'goals') x;
 
+  -- 이전 기록으로 이미 받을 자격이 있는 배지 지급
+  perform private.award_badges(id) from public.child where family_id = p_family;
+
   return jsonb_build_object('ok', true, 'entries', v_n_entry, 'todos', v_n_todo,
+    'badges', (select count(*) from public.badge where family_id = p_family),
     'balances', (select jsonb_object_agg(c.name, (select coalesce(sum(points),0) from public.entry e where e.child_id = c.id))
                    from public.child c where c.family_id = p_family));
 end $$;
