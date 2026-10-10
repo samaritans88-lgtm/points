@@ -71,9 +71,6 @@ select pg_temp.ok(not (cancel_entry((select v from ids where k='e1')::uuid)->>'o
 
 -- 3. 아이 기기 연결
 insert into ids select 'code1', create_join_code('device',(select v from ids where k='k1')::uuid,'child')->>'code';
--- Google 계정(부모 C)으로 아이 코드 입력 → 거부
-select pg_temp.as_user('00000000-0000-0000-0000-00000000000c', false);
-select pg_temp.ok(not (redeem_join_code((select v from ids where k='code1'))->>'ok')::boolean, '아이 코드는 Google 계정으로 못 씀');
 -- 공격자 E: 틀린 코드 5번 → 잠김 (맞는 코드를 넣어도)
 select pg_temp.as_user('00000000-0000-0000-0000-00000000000e', true);
 select redeem_join_code('AAAA-AAA' || g) from generate_series(1,5) g;
@@ -124,9 +121,7 @@ select pg_temp.ok((select count(*) from entry)=0 and (select count(*) from child
 -- 7. 배우자 초대
 select pg_temp.as_user('00000000-0000-0000-0000-00000000000a', false);
 insert into ids select 'pcode', create_join_code('parent')->>'code';
-select pg_temp.as_user('00000000-0000-0000-0000-00000000000e', true);
-select pg_temp.ok(not (redeem_join_code((select v from ids where k='pcode'))->>'ok')::boolean, '익명 기기는 부모 초대 못 씀');
-select pg_temp.as_user('00000000-0000-0000-0000-00000000000c', false);
+select pg_temp.as_user('00000000-0000-0000-0000-00000000000c', true);
 select pg_temp.ok((redeem_join_code((select v from ids where k='pcode'),null,'아빠')->>'ok')::boolean, '배우자 합류');
 select pg_temp.ok((select count(*) from entry)>0, '배우자도 기록 봄');
 
@@ -139,6 +134,23 @@ update family set remind_times = array[to_char(now() at time zone 'Asia/Seoul','
 select pg_temp.ok(private.remind_tick()=2, '알림 시각 → 2가족 모두 처리');
 select pg_temp.ok(private.remind_tick()=0, '같은 분에 두 번 안 보냄');
 select pg_temp.ok((select count(*) from net.calls where body->>'tag'='remind-parent')=1, '부모 알림 1건 호출');
+
+-- 7-1. 가입 없이(익명) 가족 만들기 + 복구 코드
+insert into auth.users(id,is_anonymous) values ('00000000-0000-0000-0000-0000000000f1',true),('00000000-0000-0000-0000-0000000000f2',true),('00000000-0000-0000-0000-0000000000f3',true);
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000f1', true);
+insert into ids select 'rec', create_family('익명네','[{"name":"하나"}]')->>'recovery_code';
+select pg_temp.ok(length((select v from ids where k='rec'))=12, '익명으로 가족 생성 + 12자리 복구 코드');
+select pg_temp.ok((whoami()->>'state')='parent', '익명 부모');
+reset role;
+select pg_temp.ok(not exists(select 1 from private.recovery where code_hash=(select v from ids where k='rec')), '복구 코드는 해시로만 저장');
+set role authenticated;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000f2', true);
+select pg_temp.ok(not (redeem_join_code('ZZZZZZZZZZZZ')->>'ok')::boolean, '틀린 복구 코드 거부');
+select pg_temp.ok((redeem_join_code(lower(substr((select v from ids where k='rec'),1,6))||'-'||substr((select v from ids where k='rec'),7))->>'kind')='recovery', '새 폰에서 복구 코드로 부모 복귀');
+select pg_temp.ok((select count(*) from child)=1 and (select name from child)='하나', '복구한 폰에서 가족 데이터 보임');
+select pg_temp.ok(length(new_recovery_code()->>'recovery_code')=12, '복구 코드 다시 만들기');
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000f3', true);
+select pg_temp.ok(not (redeem_join_code((select v from ids where k='rec'))->>'ok')::boolean, '다시 만들면 예전 복구 코드 무효');
 
 -- 8-1. 배지 · 공동 목표 · 이자
 set role authenticated;

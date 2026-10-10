@@ -90,6 +90,13 @@ create table private.join_code (
 );
 create index on private.join_code (family_id);
 
+-- 가족 복구 코드 (부모 폰 분실·교체 시 다시 들어오기). 해시만 저장.
+create table private.recovery (
+  family_id  uuid primary key references public.family(id) on delete cascade,
+  code_hash  text not null unique,
+  created_at timestamptz not null default now()
+);
+
 -- 코드 입력 시도 기록 (무차별 대입 차단)
 create table private.join_attempt (
   user_id uuid not null,
@@ -455,7 +462,8 @@ create or replace function public.create_family(
 language plpgsql security definer set search_path = '' as $$
 declare v_uid uuid := (select auth.uid()); v_fam uuid; c jsonb; v_child uuid; i int := 0;
 begin
-  if v_uid is null or coalesce(((select auth.jwt()) ->> 'is_anonymous')::boolean, false) then
+  -- 계정 가입 없이 시작한다(익명 로그인). 대신 복구 코드를 발급한다.
+  if v_uid is null then
     raise exception 'login_required' using errcode = '42501';
   end if;
   if exists (select 1 from public.family_member where user_id = v_uid)
@@ -503,7 +511,30 @@ begin
     (v_fam, '동생/형제 도와주기', 10, '기본', 2),
     (v_fam, '거짓말', -20, '약속', 3);
 
-  return jsonb_build_object('ok', true, 'family_id', v_fam);
+  return jsonb_build_object('ok', true, 'family_id', v_fam, 'recovery_code', private.set_recovery(v_fam));
+end $$;
+
+create or replace function private.code_hash(p_code text) returns text
+language sql immutable as $$
+  select encode(sha256(convert_to(upper(regexp_replace(coalesce(p_code,''), '[^0-9A-Za-z]', '', 'g')), 'UTF8')), 'hex')
+$$;
+
+-- 12자리 복구 코드 발급(기존 코드는 무효). 31^12 ≈ 7.9e17 경우의 수.
+create or replace function private.set_recovery(p_family uuid) returns text
+language plpgsql security definer set search_path = '' as $$
+declare v_code text := substr(private.gen_code() || private.gen_code(), 1, 12);
+begin
+  insert into private.recovery(family_id, code_hash) values (p_family, private.code_hash(v_code))
+  on conflict (family_id) do update set code_hash = excluded.code_hash, created_at = now();
+  return v_code;
+end $$;
+
+-- 복구 코드 새로 만들기 (부모)
+create or replace function public.new_recovery_code() returns jsonb
+language plpgsql security definer set search_path = '' as $$
+declare v_fam uuid := private.require_parent();
+begin
+  return jsonb_build_object('ok', true, 'recovery_code', private.set_recovery(v_fam));
 end $$;
 
 -- 가족 설정 변경 (부모)
@@ -622,6 +653,17 @@ begin
   select * into c from private.join_code
    where code = v_code and used_at is null and expires_at > now()
    for update;
+  -- 복구 코드(12자리)면 그 가족의 부모로 다시 들어온다
+  if not found and length(v_code) = 12 then
+    select r.family_id as family_id into c from private.recovery r where r.code_hash = private.code_hash(v_code);
+    if found then
+      delete from public.device where user_id = v_uid;
+      delete from public.family_member where user_id = v_uid;
+      insert into public.family_member(family_id, user_id, display_name) values (c.family_id, v_uid, p_display_name);
+      insert into private.join_attempt(user_id, ok) values (v_uid, true);
+      return jsonb_build_object('ok', true, 'kind', 'recovery', 'family_id', c.family_id);
+    end if;
+  end if;
   if not found then
     insert into private.join_attempt(user_id, ok) values (v_uid, false);
     return jsonb_build_object('ok', false, 'error', '코드가 맞지 않거나 시간이 지났어요');
@@ -632,18 +674,12 @@ begin
   end if;
 
   if c.kind = 'device' then
-    if not v_anon then
-      return jsonb_build_object('ok', false, 'error', '아이 기기 코드는 아이 폰에서 입력해 주세요');
-    end if;
     -- 이 기기가 예전에 연결돼 있었다면 새 연결로 교체
     delete from public.device where user_id = v_uid;
     insert into public.device(family_id, user_id, mode, child_id, label, last_seen)
     values (c.family_id, v_uid, c.mode, c.child_id, left(p_label, 60), now())
     returning id into v_dev;
   else
-    if v_anon then
-      return jsonb_build_object('ok', false, 'error', '부모 초대 코드는 Google 로그인 후 입력해 주세요');
-    end if;
     delete from public.device where user_id = v_uid;
     insert into public.family_member(family_id, user_id, display_name) values (c.family_id, v_uid, p_display_name);
   end if;
@@ -1001,10 +1037,12 @@ begin
   if p_confirm is distinct from v_name then
     return jsonb_build_object('ok', false, 'error', '가족 이름을 정확히 입력해 주세요');
   end if;
-  -- 아이 기기용 익명 계정도 정리
+  -- 아이 기기·부모의 익명 계정도 정리 (Google 등으로 가입한 계정은 남김)
   begin
-    delete from auth.users u using public.device d
-     where d.family_id = v_fam and d.user_id = u.id and coalesce(u.is_anonymous, false);
+    delete from auth.users u
+     where coalesce(u.is_anonymous, false)
+       and (u.id in (select user_id from public.device where family_id = v_fam)
+            or u.id in (select user_id from public.family_member where family_id = v_fam));
   exception when others then null;
   end;
   delete from public.family where id = v_fam;

@@ -207,7 +207,7 @@ async function boot(){
     return;
   }
   if (me.state === "revoked") return vRevoked();
-  if (me.state === "new") return me.anonymous ? vPair() : vOnboard();
+  if (me.state === "new") return vLanding();
   vLanding();
 }
 function errorCard(e){
@@ -263,46 +263,54 @@ function showChrome(on){ $("#hdr").style.display = on ? "flex" : "none"; if (!on
 function vLanding(){
   showChrome(false);
   const code = new URLSearchParams(location.search).get("code");
+  const prov = CFG.PROVIDERS || [];
   $("#view").innerHTML = `
   <div class="hero"><div class="logo">🪙</div><h1>우리집 포인트 통장</h1>
     <p>할 일을 하면 점수, 쓰면 가중치만큼 차감.<br>아이와 함께 쓰는 용돈 관리 앱이에요.</p></div>
   <div class="card">
-    <h3>👨‍👩‍👧 부모님</h3><div class="sub">카카오 또는 Google 계정으로 시작해요. 배우자 초대 코드를 받았어도 여기로 로그인하세요.</div>
-    ${(CFG.PROVIDERS || ["google"]).includes("kakao") ? `<button class="btn wide" style="background:#FEE500;color:#191600" onclick="oauthLogin('kakao')">카카오로 시작하기</button>` : ""}
-    ${(CFG.PROVIDERS || ["google"]).includes("google") ? `<button class="btn solid wide" onclick="oauthLogin('google')">Google로 시작하기</button>` : ""}
+    <h3>🏡 처음이에요 (부모님)</h3><div class="sub">가입 없이 바로 시작해요. 가족 이름과 아이들 이름만 정하면 끝!</div>
+    <button class="btn solid wide" onclick="startNew()">우리 가족 시작하기</button>
+    ${prov.includes("kakao") ? `<button class="btn wide" style="background:#FEE500;color:#191600" onclick="oauthLogin('kakao')">카카오로 시작하기</button>` : ""}
+    ${prov.includes("google") ? `<button class="btn ghost wide" onclick="oauthLogin('google')">Google로 시작하기</button>` : ""}
   </div>
   <div class="card">
-    <h3>📱 아이 폰</h3><div class="sub">부모님 앱에서 받은 <b>8자리 연결 코드</b>로 아이 폰을 연결해요. 아이는 가입이 필요 없어요.</div>
-    <button class="btn gold wide" onclick="startPair()">아이 폰으로 연결하기</button>
+    <h3>📱 아이 폰</h3><div class="sub">부모님 앱에서 받은 <b>8자리 연결 코드</b>로 아이 폰을 연결해요.</div>
+    <button class="btn gold wide" onclick="startPair('device')">아이 폰으로 연결하기</button>
+  </div>
+  <div class="card">
+    <h3>🔑 코드가 있어요</h3><div class="sub">배우자에게 받은 <b>초대 코드</b>(8자리)나, 폰을 바꿨을 때 쓰는 <b>복구 코드</b>(12자리)를 넣어요.</div>
+    <button class="btn ghost wide" onclick="startPair('parent')">코드 입력하기</button>
   </div>
   <div class="hint" style="text-align:center"><a href="./privacy.html">개인정보처리방침</a></div>`;
-  if (code) startPair();
+  if (code) startPair("device");
 }
+async function ensureSession(){
+  const { data } = await sb.auth.getSession();
+  if (data.session) { S.uid = data.session.user.id; return true; }
+  const { data: d2, error } = await sb.auth.signInAnonymously();
+  if (error) { toast("시작 준비 실패: " + errMsg(error)); return false; }
+  S.uid = d2 && d2.user && d2.user.id; return true;
+}
+async function startNew(){ if (await ensureSession()) vOnboard(); }
 async function oauthLogin(provider){
   const { error } = await sb.auth.signInWithOAuth({ provider,
     options: { redirectTo: location.origin + location.pathname } });
   if (error) toast(errMsg(error));
 }
-async function startPair(){
-  const { data } = await sb.auth.getSession();
-  if (!data.session) {
-    const { error } = await sb.auth.signInAnonymously();
-    if (error) { toast("연결 준비 실패: " + errMsg(error)); return; }
-  }
-  vPair();
-}
-function vPair(msg){
+async function startPair(kind){ if (await ensureSession()) vPair(kind); }
+function vPair(kind){
   showChrome(false);
   const code = new URLSearchParams(location.search).get("code") || "";
+  const parent = kind === "parent";
   $("#view").innerHTML = `
-  <div class="hero"><div class="logo">📱</div><h1>아이 폰 연결</h1>
-    <p>부모님 앱 → 관리 → <b>아이 기기 연결</b>에서<br>나온 코드를 입력하세요. (10분 안에)</p></div>
+  <div class="hero"><div class="logo">${parent?"🔑":"📱"}</div><h1>${parent?"코드 입력":"아이 폰 연결"}</h1>
+    <p>${parent?"배우자에게 받은 <b>초대 코드</b>(8자리) 또는<br>가족 <b>복구 코드</b>(12자리)를 입력하세요.":"부모님 앱 → 관리 → <b>아이 기기 연결</b>에서<br>나온 코드를 입력하세요. (10분 안에)"}</p></div>
   <div class="card">
-    ${msg ? `<div class="sub" style="color:var(--minus)">${esc(msg)}</div>` : ""}
-    <label class="f">연결 코드</label>
-    <input id="pc" value="${esc(code)}" placeholder="예: AB3K-9QXZ" autocomplete="off" autocapitalize="characters" style="font-size:22px;letter-spacing:3px;text-align:center">
-    <button class="btn solid wide" onclick="doPair()">연결하기</button>
-    <div class="hint">이 폰은 연결된 아이 전용이 돼요. 점수를 주거나 승인하는 건 부모님 폰에서만 할 수 있어요.</div>
+    <label class="f">코드</label>
+    <input id="pc" value="${esc(code)}" placeholder="${parent?"예: AB3K-9QXZ-7MPW":"예: AB3K-9QXZ"}" autocomplete="off" autocapitalize="characters" style="font-size:22px;letter-spacing:3px;text-align:center">
+    ${parent?`<label class="f">아이에게 보이는 내 이름 (선택)</label><input id="pn" placeholder="예: 아빠" maxlength="20">`:""}
+    <button class="btn solid wide" onclick="doPair()">${parent?"들어가기":"연결하기"}</button>
+    <div class="hint">${parent?"복구 코드로 들어오면 이 폰이 부모 폰이 돼요.":"이 폰은 연결된 아이 전용이 돼요. 점수를 주거나 승인하는 건 부모님 폰에서만 할 수 있어요."}</div>
   </div>
   <button class="btn ghost wide" onclick="resetLogin()">처음으로</button>`;
 }
@@ -310,10 +318,11 @@ async function doPair(){
   const code = $("#pc").value.trim();
   if (!code) return toast("코드를 입력하세요");
   const label = /iPhone|iPad/.test(navigator.userAgent) ? "아이폰" : /Android/.test(navigator.userAgent) ? "안드로이드" : "기기";
-  const r = await call("redeem_join_code", { p_code: code, p_label: label });
+  const pn = $("#pn");
+  const r = await call("redeem_join_code", { p_code: code, p_label: label, p_display_name: (pn && pn.value.trim()) || null });
   if (!r) return;
   history.replaceState(null, "", location.pathname);
-  toast("연결됐어요! 🎉");
+  toast(r.kind === "device" ? "연결됐어요! 🎉" : "가족에 들어왔어요 🎉");
   location.reload();
 }
 async function resetLogin(){ await sb.auth.signOut(); history.replaceState(null, "", location.pathname); location.reload(); }
@@ -363,11 +372,8 @@ function vOnboard(){
       <input type="checkbox" ${d.agree?"checked":""} onchange="S.draft.agree=this.checked"></label>
     <button class="btn solid wide" onclick="createFamily()">가족 만들기</button>
   </div>
-  <div class="card"><h3>💌 배우자에게 초대받았나요?</h3>
-    <div class="sub">초대 코드가 있으면 새로 만들지 말고 코드를 입력하세요.</div>
-    <div style="display:flex;gap:8px"><input id="oinv" placeholder="초대 코드 8자리" autocapitalize="characters"><button class="btn gold" onclick="joinAsParent()">합류</button></div>
-  </div>
-  <button class="btn ghost wide" onclick="resetLogin()">다른 계정으로 로그인</button>`;
+  <button class="btn ghost wide" onclick="vPair('parent')">🔑 배우자 초대·복구 코드가 있어요</button>
+  <button class="btn ghost wide" onclick="resetLogin()">처음으로</button>`;
 }
 async function createFamily(){
   const d = S.draft;
@@ -379,12 +385,22 @@ async function createFamily(){
     p_timezone: (t => !t || t === "UTC" || t === "Etc/UTC" ? "Asia/Seoul" : t)(Intl.DateTimeFormat().resolvedOptions().timeZone),
     p_display_name: d.me.trim() || null, p_examples:d.ex, p_show_siblings:d.sib, p_interest_pct: d.interest ? 2 : 0 });
   if (!r) return;
-  S.draft = null; toast("가족을 만들었어요 🎉"); location.reload();
+  S.draft = null; vRecovery(r.recovery_code, true);
 }
-async function joinAsParent(){
-  const code = $("#oinv").value.trim(); if (!code) return toast("코드를 입력하세요");
-  const r = await call("redeem_join_code", { p_code:code, p_display_name:(S.draft && S.draft.me.trim()) || null });
-  if (!r) return; toast("가족에 합류했어요 🎉"); location.reload();
+// 복구 코드 안내 (가족 만든 직후 / 관리에서 다시 만들 때)
+function vRecovery(code, first){
+  const pretty = code.replace(/(.{4})(?=.)/g, "$1-");
+  const html = `<div class="hero" style="padding-top:28px"><div class="logo">🔑</div><h1>${first?"가족을 만들었어요!":"새 복구 코드"}</h1>
+      <p>아래 <b>복구 코드</b>를 꼭 저장해 두세요.<br>폰을 잃어버리거나 바꿨을 때 이 코드로 다시 들어와요.</p></div>
+    <div class="card" style="text-align:center"><div class="code" style="font-size:28px">${pretty}</div>
+      <button class="btn ghost wide" onclick="copyText('포인트 통장 복구 코드: ${pretty}')">복사하기</button>
+      <div class="hint">📸 화면을 캡처하거나 메모 앱·카톡 나에게 보내기로 저장하세요. 이 코드를 아는 사람은 부모로 들어올 수 있으니 아이에게는 알려주지 마세요.${first?"":" 예전 복구 코드는 이제 쓸 수 없어요."}</div></div>
+    ${first?`<button class="btn solid wide" onclick="if(confirm('복구 코드를 저장했나요? 다시 보려면 관리 탭에서 새로 만들어야 해요.'))location.reload()">저장했어요, 시작하기</button>`:""}`;
+  if (first) { showChrome(false); $("#view").innerHTML = html; } else openSheet(html);
+}
+async function newRecovery(){
+  if (!confirm("복구 코드를 새로 만들까요? 예전 코드는 더 이상 쓸 수 없어요.")) return;
+  const r = await call("new_recovery_code"); if (r) vRecovery(r.recovery_code, false);
 }
 
 /* ================= 공통 계산 ================= */
@@ -736,6 +752,7 @@ function vAdmin(){
     <label class="switch"><span><b>형제끼리 점수 보이기</b><br><small class="sub">아이 폰에서 형제의 잔액·오늘 달성률이 보여요. 상세 기록은 안 보여요.</small></span>
       <input type="checkbox" ${S.fam.show_siblings?"checked":""} onchange="setFam({show_siblings:this.checked})"></label>
     <div class="grid2"><button class="btn ghost" onclick="sheetKids()">아이 추가·수정</button><button class="btn ghost" onclick="sheetInvite()">배우자 초대</button></div>
+    <button class="btn ghost wide" onclick="newRecovery()">🔑 복구 코드 새로 만들기</button>
   </div>
   <div class="card"><h3>🌳 저축 이자</h3>
     <div class="sub">모아둔 점수에 매주 이자를 줘요. 기다리면 불어나는 걸 직접 경험하는 경제교육이에요.</div>
@@ -758,7 +775,7 @@ function vAdmin(){
     <div class="grid2" style="margin-top:8px"><button class="btn ghost" onclick="exportCsv()">기록 내보내기 (CSV)</button><button class="btn ghost" onclick="refreshToday()">오늘 루틴 다시 올리기</button></div>
   </div>
   <div class="card"><h3>🚪 계정</h3>
-    <div class="grid2"><button class="btn ghost" onclick="resetLogin()">로그아웃</button><button class="btn danger" onclick="sheetLeave()">탈퇴</button></div>
+    <div class="grid2"><button class="btn ghost" onclick="if(confirm('이 폰에서 나갈까요? 다시 들어오려면 복구 코드나 배우자 초대 코드가 필요해요.'))resetLogin()">이 폰에서 나가기</button><button class="btn danger" onclick="sheetLeave()">탈퇴</button></div>
     <div class="hint"><a href="./privacy.html" target="_blank">개인정보처리방침</a></div></div>`;
 }
 function sheetInterest(){
@@ -955,11 +972,11 @@ async function makePair(mode, childId){
     "아이 폰에서 아래 주소를 열고 코드를 입력하거나, 카메라로 QR을 찍으세요. <b>10분</b> 동안만 쓸 수 있어요.");
 }
 function sheetInvite(){
-  openSheet(`<h3 style="margin-top:0">💌 배우자 초대</h3><div class="sub">초대받은 사람은 Google로 로그인한 뒤 '초대 코드'에 입력하면 같은 가족을 관리할 수 있어요. 코드는 24시간 동안 1번 쓸 수 있어요.</div>
+  openSheet(`<h3 style="margin-top:0">💌 배우자 초대</h3><div class="sub">배우자 폰에서 이 앱을 열고 <b>코드가 있어요 → 코드 입력</b>에 넣으면 같은 가족을 관리할 수 있어요. 코드는 24시간 동안 1번 쓸 수 있어요.</div>
     <button class="btn solid wide" onclick="makeInvite()">초대 코드 만들기</button>`);
 }
 async function makeInvite(){ const r = await call("create_join_code", { p_kind:"parent" }); if (!r) return;
-  showCode(r.code, "배우자 초대", "배우자에게 이 앱 주소와 코드를 보내 주세요. Google 로그인 → '배우자에게 초대받았나요?'에 입력하면 돼요.", true); }
+  showCode(r.code, "배우자 초대", "배우자에게 이 앱 주소와 코드를 보내 주세요. 앱 첫 화면 → '코드가 있어요'에 입력하면 돼요.", true); }
 function showCode(code, title, desc, noQr){
   const pretty = code.slice(0,4) + "-" + code.slice(4);
   const url = location.origin + location.pathname + "?code=" + code;

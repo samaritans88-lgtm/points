@@ -4,5 +4,5 @@ window.KP_CONFIG = {
   SUPABASE_URL: "",
   SUPABASE_KEY: "",
   // 켜둔 로그인 방법만 버튼이 보인다. Supabase 에서 해당 Provider 를 켠 뒤 추가.
-  PROVIDERS: ["google"],   // 카카오 설정이 끝나면 ["kakao", "google"]
+  PROVIDERS: [],   // 가입 없이 시작이 기본. 소셜 로그인을 켜면 ["kakao"] / ["google"]
 };
