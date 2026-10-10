@@ -73,6 +73,36 @@ html,body{margin:0;background:#F4F6FB;color:#151823;
       document.body.appendChild(s);
     });
     try{ remindPatch(); }catch(e){ console.error("remindPatch", e); }
+    try{ catPatch(); }catch(e){ console.error("catPatch", e); }
+  }
+
+  // 가중치 편집 시트 아래에 '새 카테고리 추가' 폼을 붙인다. 저장은 기존 kp_admin upsert_category.
+  function catPatch(){
+    if(typeof sheetCat!=="function"||typeof S==="undefined"||typeof window.addCat==="function")return;
+    var base=sheetCat;
+    sheetCat=function(){
+      base();
+      var inn=document.getElementById("sheetIn"),close=inn&&inn.lastElementChild;
+      if(!close)return;
+      close.insertAdjacentHTML("beforebegin",
+        '<div class="divider"></div><label class="f">새 카테고리 추가</label>'
+        +'<div style="display:flex;gap:8px"><input id="ncE" style="width:64px;text-align:center" placeholder="🏷️" maxlength="4">'
+        +'<input id="ncN" style="flex:1" placeholder="이름 (예: 게임)" maxlength="20"></div>'
+        +'<div class="grid2"><div><label class="f">가중치 (배)</label><input id="ncW" type="number" step="0.1" min="0.1" max="5" inputmode="decimal" value="1.0"></div>'
+        +'<div><label class="f">설명 (선택)</label><input id="ncH" placeholder="예: 스위치 칩" maxlength="40"></div></div>'
+        +'<div class="hint">1.0 = 정가 그대로 · 0.5 = 반값 · 1.3 = 30% 더 비싸게</div>'
+        +'<button class="btn solid" style="width:100%;margin-top:10px" onclick="addCat()">＋ 카테고리 추가</button>');
+    };
+    window.addCat=async function(){
+      var name=document.getElementById("ncN").value.trim(),w=parseFloat(document.getElementById("ncW").value);
+      if(!name)return toast("이름을 써주세요");
+      if(!(w>=0.1&&w<=5))return toast("가중치는 0.1 ~ 5 사이로 해주세요");
+      if(S.cats.some(function(c){return c.name===name})&&!confirm("'"+name+"' 카테고리가 이미 있어요. 덮어쓸까요?"))return;
+      var sort=S.cats.filter(function(c){return c.name!=="이전기록"}).reduce(function(a,c){return Math.max(a,c.sort||0)},0)+1;
+      if(!await admin("upsert_category",{name:name,weight:Math.round(w*100)/100,
+        emoji:document.getElementById("ncE").value.trim()||"🏷️",hint:document.getElementById("ncH").value.trim()||null,sort:sort}))return;
+      toast("'"+name+"' 카테고리를 추가했어요");await load();sheetCat();
+    };
   }
 
   // 정기 알림 시간 설정 (부모 모드 → 관리 탭). 시간은 kp_config.remind_times 에 저장되고
